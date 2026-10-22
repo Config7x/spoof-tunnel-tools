@@ -1,86 +1,92 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────
-#  spoof-egress-check — آیا این دیتاسنتر اجازه می‌دهد پکتِ
-#  Source-IP جعلی از سرور بیرون برود؟ (تست سه‌پروتکلی)
+#  spoof-egress-check v2 — تست باز بودن دیتاسنتر برای جعل Source IP
 #
-#  اجرا روی سرور ایرانی:
-#    sudo bash spoof-egress-check.sh --target <IP سرور خارجی> \
-#         [--spoof <IP جعلی>] [--ssh root@<IP سرور خارجی>]
+#  حالت ۱ — روی سرور خارجی (گوش می‌دهد و نتیجه نهایی را چاپ می‌کند):
+#    bash <(curl -sL RAW/spoof-egress-check.sh) --listen
 #
-#  اگر --ssh بدهید، tcpdump روی سرور خارجی خودکار اجرا و نتیجه
-#  خودکار خوانده می‌شود. اگر ندهید، اسکریپت دستور tcpdump را
-#  چاپ می‌کند و شما خروجی همان سرور را نگاه می‌کنید.
+#  حالت ۲ — روی سرور ایرانی (پکت‌های تست را می‌فرستد):
+#    bash <(curl -sL RAW/spoof-egress-check.sh) --target <IP سرور خارجی>
+#
+#  ترتیب: اول --listen روی خارج، بعد --target روی ایران.
+#  در پایان، ترمینالِ سرور خارجی نتیجه هر سه پروتکل را چاپ می‌کند.
+#
+#  گزینه‌ها:
+#    --spoof <IP>   آی‌پی جعلی (پیش‌فرض 1.1.1.1)
+#    --ssh root@IP  حالت خودکار: اسکریپت روی ایران، tcpdump خارج را هم اجرا می‌کند
+#    --dur <ثانیه>  مدت گوش دادن حالت --listen (پیش‌فرض 90)
 # ─────────────────────────────────────────────────────────────
 set -u
-TARGET=""; SPOOF="1.1.1.1"; SSHT=""; WAIT=12
+SPOOF="1.1.1.1"; TARGET=""; SSHT=""; MODE=""; DUR=90
 while [ $# -gt 0 ]; do
   case "$1" in
-    --target) TARGET="$2"; shift 2;;
-    --spoof)  SPOOF="$2";  shift 2;;
-    --ssh)    SSHT="$2";   shift 2;;
+    --listen) MODE="listen"; shift;;
+    --target) MODE="send"; TARGET="$2"; shift 2;;
+    --spoof)  SPOOF="$2"; shift 2;;
+    --ssh)    SSHT="$2"; shift 2;;
+    --dur)    DUR="$2"; shift 2;;
     *) echo "پارامتر ناشناخته: $1"; exit 1;;
   esac
 done
 
-[ "$(id -u)" = "0" ] || { echo "با sudo اجرا کنید."; exit 1; }
-# اگر فقط --ssh داده شده، target همان IP است
-if [ -z "$TARGET" ] && [ -n "$SSHT" ]; then
-  TARGET="${SSHT##*@}"
+# ───────────────────────── حالت گوش دادن (سرور خارجی) ─────────────────────────
+if [ "$MODE" = "listen" ]; then
+  command -v tcpdump >/dev/null || { echo "tcpdump نصب نیست: apt update && apt install -y tcpdump"; exit 1; }
+  [ "$(id -u)" = "0" ] || { echo "با sudo اجرا کنید."; exit 1; }
+  OUT=$(mktemp)
+  echo "──────────────────────────────────────────────"
+  echo " در حال گوش دادن به پکت‌های سورس $SPOOF  ($DUR ثانیه)"
+  echo " حالا روی سرور ایرانی دستور --target را اجرا کنید"
+  echo "──────────────────────────────────────────────"
+  timeout "$DUR" tcpdump -nn -i any "src host $SPOOF" > "$OUT" 2>/dev/null
+  C=$(LC_ALL=C grep -c "ICMP" "$OUT"); C=${C:-0}
+  U=$(LC_ALL=C grep -c "UDP" "$OUT"); U=${U:-0}
+  T=$(LC_ALL=C grep -c 'Flags \[S' "$OUT"); T=${T:-0}
+  mark(){ [ "$1" -gt 0 ] && echo "✅ باز  ($1 پکت)" || echo "❌ بسته"; }
+  echo
+  echo "════════════ نتیجه نهایی ════════════"
+  echo " ICMP     : $(mark "$C")"
+  echo " UDP/DNS  : $(mark "$U")"
+  echo " TCP SYN  : $(mark "$T")"
+  echo "═════════════════════════════════════"
+  if [ "$C" -gt 0 ] && [ "$U" -gt 0 ]; then echo "جمع‌بندی: دیتاسنتر فیلتر خروجی ندارد؛ برای اسپوف تانل قابل استفاده است 🎯"
+  elif [ "$C" -gt 0 ] || [ "$U" -gt 0 ] || [ "$T" -gt 0 ]; then echo "جمع‌بندی: فقط برخی پروتکل‌ها رد می‌شوند؛ اسپوف تانل فقط با همان پروتکل کار می‌کند."
+  else echo "جمع‌بندی: همه بسته شد؛ این دیتاسنتر BCP38 دارد — سراغ ارائه‌دهنده دیگر بروید."; echo "نکته: با --spoof یک IP از رنج خود سرور ایرانی هم تست کنید."
+  fi
+  rm -f "$OUT"; exit 0
 fi
-[ -n "$TARGET" ] || { echo "خطا: --target <IP سرور خارجی> یا --ssh root@<IP> لازم است."; exit 1; }
 
+# ───────────────────────── حالت ارسال (سرور ایرانی) ─────────────────────────
+[ "$MODE" = "send" ] || { echo "حالت را مشخص کنید: --listen (روی خارج) یا --target <IP> (روی ایران)"; exit 1; }
+[ "$(id -u)" = "0" ] || { echo "با sudo اجرا کنید."; exit 1; }
 IPT=$(command -v iptables || true)
-[ -n "$IPT" ] || { echo "iptables نیست. روی اوبونتو: apt update && apt install -y iptables tcpdump"; exit 1; }
-
+[ -n "$IPT" ] || { echo "iptables نیست: apt update && apt install -y iptables"; exit 1; }
+if [ -z "$TARGET" ] && [ -n "$SSHT" ]; then TARGET="${SSHT##*@}"; fi
+[ -n "$TARGET" ] || { echo "خطا: --target <IP سرور خارجی> لازم است."; exit 1; }
 echo "سرور خارجی هدف : $TARGET"
-echo "Source جعلی    : $SPOOF"
-echo
+echo "Source جعلی     : $SPOOF"
 
 RULE_ADDED=""
-cleanup(){ [ -n "$RULE_ADDED" ] && $IPT -t nat -D POSTROUTING -d "$TARGET" -j SNAT --to-source "$SPOOF" 2>/dev/null; }
+cleanup(){ [ -n "$RULE_ADDED" ] && $IPT -t nat -D POSTROUTING -d "$TARGET" -j SNAT --to-source "$SPOOF" 2>/dev/null; RULE_ADDED=""; }
 trap cleanup EXIT
 
-remote_dump(){ # $1 = proto filter , $2 = seconds
-  if [ -n "$SSHT" ]; then
-    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "$SSHT" \
-      "timeout $2 tcpdump -nn -i any $1 2>/dev/null | grep -m1 '$SPOOF' && echo MATCH || echo NOMATCH" 2>/dev/null
-  else
-    echo "MANUAL"
-  fi
-}
-
-run_proto(){ # $1=label  $2=iptables proto  $3=tcpdump filter  $4=trigger commands
-  local label="$1" proto="$2" filt="$3" trig="$4"
-  echo "──────── $label ────────"
-  $IPT -t nat -A POSTROUTING -p "$proto" -d "$TARGET" -j SNAT --to-source "$SPOOF"
+send(){ # $1=proto  $2=trigger
+  $IPT -t nat -A POSTROUTING -p "$1" -d "$TARGET" -j SNAT --to-source "$SPOOF"
   RULE_ADDED=1
-  if [ -n "$SSHT" ]; then
-    ( sleep 1; eval "$trig" >/dev/null 2>&1 ) &
-    local res; res=$(remote_dump "$filt" "$WAIT")
-    [ "$res" = "MATCH" ] && echo "نتیجه: ✅ باز (پکتِ جعلی رسید)" || echo "نتیجه: ❌ بسته یا نامطمئن (چیزی نرسید)"
-  else
-    eval "$trig" >/dev/null 2>&1
-    echo "روی سرور خارجی این را بزنید و ببینید پکت با سورس $SPOOF می‌رسد یا نه:"
-    echo "  sudo tcpdump -nn -i any $filt"
-  fi
-  cleanup; RULE_ADDED=""
-  echo
+  eval "$2" >/dev/null 2>&1
+  cleanup
+  echo "  ✔ $1 ارسال شد"
 }
 
-run_proto "ICMP" "icmp" "icmp" "ping -c 5 -W 2 $TARGET"
-run_proto "UDP (شبیه DNS)" "udp" "udp" "for i in 1 2 3; do echo spoof > /dev/udp/$TARGET/53; done; sleep 1"
-run_proto "TCP SYN" "tcp" "tcp and tcp[tcpflags] & tcp-syn != 0" "timeout 5 nc -z -w2 $TARGET 80; timeout 5 nc -z -w2 $TARGET 443"
-
-cat <<'TXT'
-─────────────────────────────────────────────
-راهنمای نتیجه:
- • ICMP باز + UDP باز  → دیتاسنتر فیلتر خروجی ندارد؛ برای اسپوف تانل قابل استفاده است
- • فقط ICMP باز        → فقط برای همان حالت کار می‌کند؛ UDP/TCP را تست نکنید
- • همه بسته            → این دیتاسنتر BCP38 دارد؛ سراغ جای دیگر بروید
- • ❌ روی ICMP           → با --spoof یک رنج دیگر (همان رنج سرور) هم تست کنید؛
-                        بعضی دیتاسنترها فقط رنج خودشان را می‌گذارند بیرون
-
-بعد از پیدا کردن دیتاسنتر باز، مرحله دوم این است که بفهمید کدام
-Source-IP جعلی واقعاً از لیست سفید بین‌المللی عبور می‌کند: از ماژول
-tester در پنل spoof-tunnel روی رنج‌های ایرانی اسکن بگیرید.
-TXT
+echo "در حال ارسال تست‌ها..."
+send icmp "ping -c 4 -W 2 $TARGET"
+sleep 1
+send udp "for i in 1 2 3; do echo spoof > /dev/udp/$TARGET/53; sleep 0.3; done"
+sleep 1
+send tcp "timeout 4 nc -z -w2 $TARGET 80; timeout 4 nc -z -w2 $TARGET 443; timeout 4 nc -z -w2 $TARGET 8080"
+echo
+if [ -n "$SSHT" ]; then
+  echo "tcpdump روی سرور خارجی اجرا شد؛ خروجی را از همان سرور ببینید."
+else
+  echo "تمام شد ✅ حالا نتیجه نهایی روی ترمینال سرور خارجی چاپ شده است."
+fi
