@@ -16,11 +16,12 @@
 #
 #  گزینه‌ها:
 #    --spoof a,b,c  لیست IPهای جعلی (هر دو طرف باید یکسان باشد)
-#    --dur <ثانیه>   مدت گوش دادن (پیش‌فرض 120)
+#    --dur <ثانیه>   حداکثر مدت گوش دادن (پیش‌فرض 60؛
+#                    با رسیدن سیگنال پایان از سمت ایران، زودتر تمام می‌شود)
 #    --ssh root@IP   حالت خودکار روی ایران (نیازمند کلید SSH)
 # ─────────────────────────────────────────────────────────────
 set -u
-SPOOFS="1.1.1.1,8.8.8.8,9.9.9.9"; TARGET=""; SSHT=""; MODE=""; DUR=120
+SPOOFS="1.1.1.1,8.8.8.8,9.9.9.9"; TARGET=""; SSHT=""; MODE=""; DUR=60
 while [ $# -gt 0 ]; do
   case "$1" in
     --listen) MODE="listen"; shift;;
@@ -39,13 +40,26 @@ if [ "$MODE" = "listen" ]; then
   command -v tcpdump >/dev/null || { echo "tcpdump نصب نیست: apt update && apt install -y tcpdump"; exit 1; }
   [ "$(id -u)" = "0" ] || { echo "با sudo اجرا کنید."; exit 1; }
   OUT=$(mktemp)
-  FILTER="src host ${SPLIST[0]}"
+  FILTER="(src host ${SPLIST[0]}"
   for ip in "${SPLIST[@]:1}"; do FILTER="$FILTER or src host $ip"; done
+  FILTER="$FILTER) or (udp port 9999)"
   echo "──────────────────────────────────────────────"
   echo " گوش دادن به پکت‌های سورس: ${SPLIST[*]}"
-  echo " مدت: $DUR ثانیه — حالا روی سرور ایرانی --target را اجرا کنید"
+  echo " (حداکثر $DUR ثانیه؛ به محض اتمام تست ایران، خودکار تمام می‌شود)"
   echo "──────────────────────────────────────────────"
-  timeout "$DUR" tcpdump -nn -i any "$FILTER" > "$OUT" 2>/dev/null
+  tcpdump -nn -l -i any "$FILTER" > "$OUT" 2>/dev/null &
+  TPID=$!
+  ELAPSED=0
+  while [ "$ELAPSED" -lt "$DUR" ]; do
+    sleep 1; ELAPSED=$((ELAPSED+1))
+    # سیگنال پایان از سمت ایران (پورت 9999) — استثنا: پکت خودم
+    if LC_ALL=C grep -q "\.9999: UDP" "$OUT" 2>/dev/null; then
+      sleep 2   # پکت‌های آخر تست هم برسند
+      kill "$TPID" 2>/dev/null
+      break
+    fi
+  done
+  kill "$TPID" 2>/dev/null; wait "$TPID" 2>/dev/null
   echo
   echo "══════════════════ نتیجه نهایی ══════════════════"
   ANY_OPEN=0
@@ -98,5 +112,7 @@ for ip in "${SPLIST[@]}"; do
   send tcp  "$ip" "for p in 80 443 8080 22; do timeout 3 nc -z -w2 $TARGET $p; done"
   sleep 1
 done
+# سیگنال پایان: سه پکت UDP به پورت 9999 با IP واقعی (بدون SNAT)
+for i in 1 2 3; do echo done > /dev/udp/$TARGET/9999; sleep 1; done
 echo
 echo "تمام شد ✅ نتیجه نهایی روی ترمینال سرور خارجی چاپ شده است."
