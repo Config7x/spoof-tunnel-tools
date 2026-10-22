@@ -49,17 +49,26 @@ if [ "$MODE" = "listen" ]; then
   echo "──────────────────────────────────────────────"
   tcpdump -nn -l -i any "$FILTER" > "$OUT" 2>/dev/null &
   TPID=$!
-  ELAPSED=0
+  ELAPSED=0; GOT_SIGNAL=0
   while [ "$ELAPSED" -lt "$DUR" ]; do
     sleep 1; ELAPSED=$((ELAPSED+1))
-    # سیگنال پایان از سمت ایران (پورت 9999) — استثنا: پکت خودم
+    # سیگنال پایان از سمت ایران (پورت 9999)
     if LC_ALL=C grep -q "\.9999: UDP" "$OUT" 2>/dev/null; then
+      GOT_SIGNAL=1
       sleep 2   # پکت‌های آخر تست هم برسند
       kill "$TPID" 2>/dev/null
       break
     fi
   done
   kill "$TPID" 2>/dev/null; wait "$TPID" 2>/dev/null
+  if [ "$GOT_SIGNAL" = "0" ]; then
+    echo
+    echo "⚠ سیگنال پایان از سرور ایران دریافت نشد."
+    echo " یعنی یا دستور --target روی سرور ایرانی اجرا نشده،"
+    echo " یا ارتباط ایران→خارج (حتی با IP واقعی) کلاً قطع است."
+    echo " پس نتیجه تست معتبر نیست؛ بعد از اجرای سمت ایران دوباره امتحان کنید."
+    rm -f "$OUT"; exit 2
+  fi
   echo
   echo "══════════════════ نتیجه نهایی ══════════════════"
   ANY_OPEN=0
